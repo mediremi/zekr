@@ -8,7 +8,7 @@ A test framework for ReScript applications.
 ## This fork
 
 This `fixes` branch is upstream's `main` with these fixes, each its own
-commit with tests:
+commit with tests, and [fuzz testing](#fuzz-testing):
 
 - An exception thrown by a synchronous test fails that test, as it already did
   for async tests, rather than stopping the rest of its file.
@@ -31,6 +31,77 @@ commit with tests:
 To use it, add it to `package.json` as `"zekr": "github:mediremi/zekr#fixes"`.
 npm compiles it when installing it (`prepare`), and `package-lock.json` pins
 the commit.
+
+### Fuzz testing
+
+`Test.fuzz` checks a property on random values from a fuzzer, 100 of them
+unless you pass `~runs`:
+
+```rescript
+Test.fuzz("adds up to 1000 at most", Fuzz.array(Fuzz.int), numbers =>
+  Assert.lessThanOrEqual(numbers->Array.reduce(0, (a, b) => a + b), 1000)
+)
+```
+
+When a value fails, zekr shrinks it to a simpler value that fails too, and
+says how to get the same values again:
+
+```
+   ✗ adds up to 1000 at most
+     Failed after 3 runs, shrunk in 29 steps. Seed 2718.
+       Given: [
+         1001
+       ]
+       Assertion failed: expected actual <= threshold
+       actual:    1001
+       threshold: 1000
+       Reproduce it with ZEKR_SEED=2718 or zekr --seed 2718
+```
+
+It works like elm-test 2's fuzz tests:
+
+- **Fuzzers** are in `Fuzz` (documented in `src/Fuzz.resi`): `int`,
+  `intRange`, `float` (finite floats only), `floatRange`, `bool`, `char`,
+  `asciiString`, `string` and `constant`; `array`, `list`, `option`,
+  `result` and `tuple2`; `oneOf`, `oneOfValues` and `frequency`; `map`,
+  `map2`, `map3`, `andThen`, `filter`, `lazy_` and `recursive`. `Fuzz.make`
+  draws from several fuzzers, e.g. for a record:
+
+  ```rescript
+  let user = Fuzz.make(({draw}) => {
+    name: draw(Fuzz.string),
+    age: draw(Fuzz.option(Fuzz.intRange(0, 130))),
+  })
+  ```
+
+  `Fuzz.examples` and `Fuzz.labelExamples` show what a fuzzer makes.
+- **Shrinking:** a fuzzer makes its value from random choices, which the test
+  records. To shrink a value, zekr edits its choices and makes the value
+  again, keeping each edit that gives smaller choices and a value that still
+  fails. So there's no shrinking code to write, it works through `map` and
+  `andThen`, and a shrunk value is always one its fuzzer could have made:
+  `Fuzz.intRange(10, 20)` never shrinks below 10. It stops after 10,000 runs
+  of the test (`~maxShrinks`).
+- **Seeds:** each run uses a random seed, unless `ZEKR_SEED` or
+  `zekr --seed` gives one. A test's values come from the seed and the test's
+  name, so the seed reproduces them whichever other tests run.
+- **Distributions:** `~distribution` counts what share of the values has each
+  label. `Distribution.report` prints a table of them, before the test's ✓,
+  and `Distribution.expect` fails the test when a label is rarer than
+  expected (`AtLeast(percentage)`, `Zero` or `MoreThanZero`). `AtLeast` runs
+  more values when it needs them to be sure, and is wrong about once in 10^9
+  checks. `Zero` fails as soon as a value has the label, but can't be sure
+  none ever will; `MoreThanZero` passes as soon as one does, and fails only
+  after 10,000 values without one:
+
+  ```rescript
+  Test.fuzz("survives long queues", Fuzz.list(operation), run, ~distribution=Distribution.expect([
+    (AtLeast(10.), "over 10 operations", operations => List.length(operations) > 10),
+  ]))
+  ```
+- **Async:** `Test.fuzzAsync` takes a property that returns a promise. Its
+  `~timeout` is for each run of the property, so a run that takes too long
+  fails like any other, and is shrunk and reported with the seed.
 
 ## Installation
 
@@ -462,6 +533,7 @@ By default it scans the current directory for files ending in `.test.res`
 | `--pattern <suffix>` | `-p` | `.test.res` | Filename suffix to match |
 | `--dir <path>` | `-d` | `.` | Directory to scan |
 | `--watch` | `-w` | | Watch for changes and re-run only impacted tests |
+| `--seed <number>` | | random | Seed for [fuzz tests](#fuzz-testing), like `ZEKR_SEED` |
 | `--help` | `-h` | | Show usage |
 
 ### Watch mode (`--watch`)
