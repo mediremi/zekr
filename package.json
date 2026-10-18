@@ -17,6 +17,7 @@
   ],
   "scripts": {
     "build": "rescript",
+    "prepare": "rescript",
     "clean": "rescript clean",
     "watch": "rescript -w",
     "test": "rescript && node bin/zekr.mjs",
