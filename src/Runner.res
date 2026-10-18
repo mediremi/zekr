@@ -50,17 +50,69 @@ let shouldRunTest = (suiteName: string, testName: string): bool => {
   }
 }
 
-// How a test that threw an exception is reported
+module NodeUtil = {
+  @module("util") external inspect: 'a => string = "inspect"
+}
+
+// How ReScript compiles an exception, e.g. `Failure("boom")` is
+// {RE_EXN_ID: "Failure", _1: "boom", Error: new Error()}, and one with an
+// inline record, `Bad({code: 3})`, is {RE_EXN_ID: Bad, code: 3, Error: ...}
+type rescriptException = {
+  @as("RE_EXN_ID") id: string,
+  @as("Error") error: Nullable.t<JsExn.t>,
+}
+external asRescriptException: exn => rescriptException = "%identity"
+external asDict: exn => dict<unknown> = "%identity"
+
+// The directory zekr's own modules are in, to leave its frames out of stacks
+let ownDirectory: string = %raw(`new URL(".", import.meta.url).href`)
+
+// Where a test threw, from a stack: its first frame in the project's own
+// code, rather than in zekr, Node or a dependency (e.g. the ReScript runtime's
+// JsError.throwWithMessage)
+let thrownAt = (stack: option<string>): option<string> =>
+  stack
+  ->Option.getOr("")
+  ->String.split("\n")
+  ->Array.map(String.trim)
+  ->Array.find(line =>
+    String.startsWith(line, "at ") &&
+    !String.includes(line, ownDirectory) &&
+    !String.includes(line, "/node_modules/") &&
+    !String.includes(line, "node:")
+  )
+
+// How a test that threw an exception is reported: a JS error's name and
+// message, or a ReScript exception's name and payload, and where it was thrown
 let exceptionFailure = (exn: exn): testResult => {
-  let message = switch exn {
+  let (description, stack) = switch exn {
   | JsExn(err) =>
+    let name = JsExn.name(err)->Option.getOr("Error")
     switch JsExn.message(err) {
-    | Some(msg) => msg
-    | None => "Unknown error"
+    | Some(message) => (`${name}: ${message}`, JsExn.stack(err))
+    // Not an Error, e.g. a thrown string
+    | None => (NodeUtil.inspect(err), None)
     }
-  | _ => "Test threw an exception"
+  | _ =>
+    let {id, error} = asRescriptException(exn)
+    let payload =
+      asDict(exn)
+      ->Dict.toArray
+      ->Array.filter(((key, _value)) => key != "RE_EXN_ID" && key != "Error")
+    let positional = payload->Array.every(((key, _value)) => /^_\d+$/->RegExp.test(key))
+    let description = switch payload {
+    | [] => id
+    | _ if positional =>
+      `${id}(${payload->Array.map(((_key, value)) => NodeUtil.inspect(value))->Array.join(", ")})`
+    | _ => `${id}(${NodeUtil.inspect(Dict.fromArray(payload))})`
+    }
+    (description, error->Nullable.toOption->Option.flatMap(JsExn.stack))
   }
-  Fail(`Test threw an exception: ${message}`)
+  let location = switch thrownAt(stack) {
+  | Some(frame) => `\n    ${frame}`
+  | None => ""
+  }
+  Fail(`Test threw an exception: ${description}${location}`)
 }
 
 // Runs a synchronous test, so that an exception it throws fails that test

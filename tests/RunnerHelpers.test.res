@@ -1,5 +1,8 @@
 open Types
 
+exception Invalid(string, int)
+exception Bad({field: string, code: int})
+
 let syncHelperTests = Suite.make(
   "Runner accumulate helpers (sync)",
   [
@@ -28,6 +31,44 @@ let syncHelperTests = Suite.make(
       | _ => Fail("Expected a failure with the exception's message")
       }
     }),
+    Test.make("names a ReScript exception, with its payload", () =>
+      switch Runner.runSafely(() => throw(Invalid("age", -1))) {
+      | Fail(msg) => Assert.contains(msg, "Invalid('age', -1)")
+      | Pass => Fail("Expected Fail")
+      }
+    ),
+    Test.make("names a ReScript exception, with an inline record payload", () =>
+      switch Runner.runSafely(() => throw(Bad({field: "age", code: 3}))) {
+      | Fail(msg) => Assert.contains(msg, "Bad({ field: 'age', code: 3 })")
+      | Pass => Fail("Expected Fail")
+      }
+    ),
+    Test.make("names a ReScript exception without a payload", () =>
+      switch Runner.runSafely(() => throw(Not_found)) {
+      | Fail(msg) => Assert.contains(msg, "Test threw an exception: Not_found")
+      | Pass => Fail("Expected Fail")
+      }
+    ),
+    Test.make("gives a JS error's name", () =>
+      switch Runner.runSafely(() => JsError.TypeError.throwWithMessage("x is undefined")) {
+      | Fail(msg) => Assert.contains(msg, "TypeError: x is undefined")
+      | Pass => Fail("Expected Fail")
+      }
+    ),
+    Test.make("says where the exception was thrown, outside zekr", () =>
+      switch (
+        Runner.runSafely(() => throw(Not_found)),
+        Runner.runSafely(() => JsError.throwWithMessage("boom")),
+      ) {
+      | (Fail(rescript), Fail(js)) =>
+        Assert.combineResults([
+          Assert.contains(rescript, "RunnerHelpers.test.js:"),
+          Assert.contains(js, "RunnerHelpers.test.js:"),
+          Assert.isFalse(String.includes(js, "/src/Runner.js")),
+        ])
+      | _ => Fail("Expected two failures")
+      }
+    ),
     Test.make("runSuiteAccumulate runs the tests after one that throws", () => {
       Runner.setFilterPattern(None)
       Runner.setSkipPattern(None)
@@ -100,4 +141,5 @@ let asyncHelperTests = Suite.async(
     }),
   ],
 )
+
 
