@@ -50,6 +50,26 @@ let shouldRunTest = (suiteName: string, testName: string): bool => {
   }
 }
 
+// How a test that threw an exception is reported
+let exceptionFailure = (exn: exn): testResult => {
+  let message = switch exn {
+  | JsExn(err) =>
+    switch JsExn.message(err) {
+    | Some(msg) => msg
+    | None => "Unknown error"
+    }
+  | _ => "Test threw an exception"
+  }
+  Fail(`Test threw an exception: ${message}`)
+}
+
+// Runs a synchronous test, so that an exception it throws fails that test
+// rather than stopping the run (runWithTimeout does the same for async tests)
+let runSafely = (run: unit => testResult): testResult =>
+  try run() catch {
+  | exn => exceptionFailure(exn)
+  }
+
 let runSuite = (testSuite: testSuite): unit => {
   Console.log(`\n ${Colors.suite(`Running test suite: ${testSuite.name}`)}`)
   Console.log(Colors.dimmed("=" ++ String.repeat("-", String.length(testSuite.name) + 23)))
@@ -82,7 +102,7 @@ let runSuite = (testSuite: testSuite): unit => {
       | _ => ()
       }
 
-      switch testCase.run() {
+      switch runSafely(testCase.run) {
       | Pass => {
           Console.log(`  ${Colors.pass("✓")} ${testCase.name}`)
           passed := passed.contents + 1
@@ -140,16 +160,7 @@ let runWithTimeout = async (run: unit => promise<testResult>, timeout: option<in
     try {
       await run()
     } catch {
-    | exn =>
-      let message = switch exn {
-      | JsExn(err) =>
-        switch JsExn.message(err) {
-        | Some(msg) => msg
-        | None => "Unknown error"
-        }
-      | _ => "Test threw an exception"
-      }
-      Fail(`Test threw an exception: ${message}`)
+    | exn => exceptionFailure(exn)
     }
   }
 
@@ -226,7 +237,7 @@ let runSuiteAccumulate = (testSuite: testSuite, ~hasOnly: bool): (int, int, int,
       | _ => ()
       }
 
-      switch testCase.run() {
+      switch runSafely(testCase.run) {
       | Pass => {
           Console.log(`   ${Colors.pass("✓")} ${testCase.name}`)
           suitePassed := suitePassed.contents + 1
