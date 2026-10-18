@@ -18,6 +18,15 @@ commit with tests:
 - Failure messages show the contents of records, variants and other objects
   (with `util.inspect`) instead of `[object Object]`, and `Assert.equal`
   shows a line diff of actual and expected.
+- A hook that throws (or rejects) fails the tests it was for, as in ava,
+  rather than stopping the rest of its file. A failed `beforeEach` fails its
+  test, which doesn't run; a failed `afterEach` fails its test; a failed
+  `beforeAll` fails every test in the suite, with the reason; and a failed
+  `afterAll` is reported and counted as a failure. A suite none of whose
+  tests run (all filtered out, skipped, or not `only`) runs no hooks. An
+  async hook that doesn't settle in time fails too, rather than leaving the
+  file hanging: `beforeEach` and `afterEach` get their test's `~timeout`, and
+  otherwise a hook gets 10 seconds (`Runner.setHookTimeout` changes it).
 
 To use it, add it to `package.json` as `"zekr": "github:mediremi/zekr#fixes"`.
 npm compiles it when installing it (`prepare`), and `package-lock.json` pins

@@ -82,9 +82,10 @@ let thrownAt = (stack: option<string>): option<string> =>
     !String.includes(line, "node:")
   )
 
-// How a test that threw an exception is reported: a JS error's name and
-// message, or a ReScript exception's name and payload, and where it was thrown
-let exceptionFailure = (exn: exn): testResult => {
+// How a test (or a hook, the thrower) that threw an exception is reported: a JS
+// error's name and message, or a ReScript exception's name and payload, and
+// where it was thrown
+let exceptionFailure = (~thrower="Test", exn: exn): testResult => {
   let (description, stack) = switch exn {
   | JsExn(err) =>
     let name = JsExn.name(err)->Option.getOr("Error")
@@ -112,7 +113,7 @@ let exceptionFailure = (exn: exn): testResult => {
   | Some(frame) => `\n    ${frame}`
   | None => ""
   }
-  Fail(`Test threw an exception: ${description}${location}`)
+  Fail(`${thrower} threw an exception: ${description}${location}`)
 }
 
 // Runs a synchronous test, so that an exception it throws fails that test
@@ -122,6 +123,97 @@ let runSafely = (run: unit => testResult): testResult =>
   | exn => exceptionFailure(exn)
   }
 
+// Runs a hook, so that an exception it throws is a failure, of the tests it was
+// for, rather than stopping the run
+let runHook = (hook: option<unit => unit>, ~name: string): testResult =>
+  switch hook {
+  | None => Pass
+  | Some(fn) =>
+    try {
+      fn()
+      Pass
+    } catch {
+    | exn => exceptionFailure(exn, ~thrower=`${name} hook`)
+    }
+  }
+
+// The result of a promise, or Fail(message) if it takes more than ms
+let failAfter = async (result: promise<testResult>, ms: int, ~message: string): testResult => {
+  let timer = ref(None)
+  let timeout = Promise.make((resolve, _reject) => {
+    timer := Some(setTimeout(() => resolve(Fail(message)), ms))
+  })
+  let result = await Promise.race([result, timeout])
+  timer.contents->Option.forEach(clearTimeout)
+  result
+}
+
+// How long an async hook can take, in milliseconds: beforeAll and afterAll,
+// and beforeEach and afterEach when their test has no timeout. Ten seconds,
+// ava's default.
+let hookTimeout = ref(10000)
+
+let setHookTimeout = (ms: int): unit => {
+  hookTimeout := ms
+}
+
+// runHook, for an async hook, which fails if it takes longer than `timeout`
+// (or hookTimeout) rather than leaving the file hanging
+let runAsyncHook = async (
+  hook: option<unit => promise<unit>>,
+  ~name: string,
+  ~timeout: option<int>=?,
+): testResult =>
+  switch hook {
+  | None => Pass
+  | Some(fn) =>
+    let run = async () =>
+      try {
+        await fn()
+        Pass
+      } catch {
+      | exn => exceptionFailure(exn, ~thrower=`${name} hook`)
+      }
+    let ms = timeout->Option.getOr(hookTimeout.contents)
+    await failAfter(run(), ms, ~message=`${name} hook timed out after ${Int.toString(ms)}ms`)
+  }
+
+// A test's result once its afterEach hook has run: a failing afterEach fails
+// the test, and adds to the test's own failure
+let withAfterEach = (result: testResult, afterEach: testResult): testResult =>
+  switch (result, afterEach) {
+  | (Pass, _) => afterEach
+  | (Fail(message), Fail(hookMessage)) => Fail(`${message}\n    ${hookMessage}`)
+  | (Fail(_), Pass) => result
+  }
+
+// Runs a test between its suite's beforeEach and afterEach hooks, as ava does:
+// a failed beforeAll fails the test, and a failed beforeEach fails it without
+// running it. afterEach still runs then, to clean up after beforeEach.
+let runTest = (testCase: testCase, ~hooks: option<hooks>, ~beforeAll: testResult): testResult =>
+  switch beforeAll {
+  | Fail(_) => beforeAll
+  | Pass =>
+    let result = switch runHook(hooks->Option.flatMap(h => h.beforeEach), ~name="beforeEach") {
+    | Pass => runSafely(testCase.run)
+    | failure => failure
+    }
+    withAfterEach(result, runHook(hooks->Option.flatMap(h => h.afterEach), ~name="afterEach"))
+  }
+
+// Whether a test runs by its mode: when any test is `only`, just those do
+let runsByMode = (mode: testMode, ~hasOnly: bool): bool =>
+  switch mode {
+  | Skip => false
+  | Only => true
+  | Normal => !hasOnly
+  }
+
+// A suite's hooks, unless none of its tests run: then, as in ava, its hooks
+// don't either, so that a suite nobody selected can't fail the run
+let hooksIfAnyRuns = (hooks: option<'hooks>, tests: array<'test>, runs: 'test => bool) =>
+  tests->Array.some(runs) ? hooks : None
+
 let runSuite = (testSuite: testSuite): unit => {
   Console.log(`\n ${Colors.suite(`Running test suite: ${testSuite.name}`)}`)
   Console.log(Colors.dimmed("=" ++ String.repeat("-", String.length(testSuite.name) + 23)))
@@ -130,31 +222,19 @@ let runSuite = (testSuite: testSuite): unit => {
   let failed = ref(0)
   let skipped = ref(0)
 
-  // Run beforeAll hook if present
-  switch testSuite.hooks {
-  | Some({beforeAll: Some(fn)}) => fn()
-  | _ => ()
-  }
-
   // Check if there are any "Only" tests
   let hasOnly = testSuite.tests->Array.some(tc => tc.mode == Only)
 
+  let hooks = hooksIfAnyRuns(testSuite.hooks, testSuite.tests, (tc: testCase) =>
+    runsByMode(tc.mode, ~hasOnly)
+  )
+
+  // Run beforeAll hook if present
+  let beforeAll = runHook(hooks->Option.flatMap(h => h.beforeAll), ~name="beforeAll")
+
   testSuite.tests->Array.forEach(testCase => {
-    // Determine if this test should run
-    let shouldRun = switch testCase.mode {
-    | Skip => false
-    | Only => true
-    | Normal => !hasOnly
-    }
-
-    if shouldRun {
-      // Run beforeEach hook if present
-      switch testSuite.hooks {
-      | Some({beforeEach: Some(fn)}) => fn()
-      | _ => ()
-      }
-
-      switch runSafely(testCase.run) {
+    if runsByMode(testCase.mode, ~hasOnly) {
+      switch runTest(testCase, ~hooks, ~beforeAll) {
       | Pass => {
           Console.log(`  ${Colors.pass("✓")} ${testCase.name}`)
           passed := passed.contents + 1
@@ -164,12 +244,6 @@ let runSuite = (testSuite: testSuite): unit => {
           Console.log(`    ${Colors.fail(message)}`)
           failed := failed.contents + 1
         }
-      }
-
-      // Run afterEach hook if present
-      switch testSuite.hooks {
-      | Some({afterEach: Some(fn)}) => fn()
-      | _ => ()
       }
     } else {
       Console.log(
@@ -182,9 +256,13 @@ let runSuite = (testSuite: testSuite): unit => {
   })
 
   // Run afterAll hook if present
-  switch testSuite.hooks {
-  | Some({afterAll: Some(fn)}) => fn()
-  | _ => ()
+  switch runHook(hooks->Option.flatMap(h => h.afterAll), ~name="afterAll") {
+  | Pass => ()
+  | Fail(message) => {
+      Console.log(`  ${Colors.fail("✗")} afterAll`)
+      Console.log(`    ${Colors.fail(message)}`)
+      failed := failed.contents + 1
+    }
   }
 
   Console.log("")
@@ -218,16 +296,37 @@ let runWithTimeout = async (run: unit => promise<testResult>, timeout: option<in
 
   switch timeout {
   | None => await testPromise()
-  | Some(ms) => {
-      let timeoutPromise: promise<testResult> = Promise.make((resolve, _reject) => {
-        let _ = setTimeout(() => {
-          resolve(Fail(`Test timed out after ${Int.toString(ms)}ms`))
-        }, ms)
-      })
-      await Promise.race([testPromise(), timeoutPromise])
-    }
+  | Some(ms) =>
+    await failAfter(testPromise(), ms, ~message=`Test timed out after ${Int.toString(ms)}ms`)
   }
 }
+
+// runTest, for an async test and hooks
+let runAsyncTest = async (
+  testCase: asyncTestCase,
+  ~hooks: option<asyncHooks>,
+  ~beforeAll: testResult,
+): testResult =>
+  switch beforeAll {
+  | Fail(_) => beforeAll
+  | Pass =>
+    let result = switch await runAsyncHook(
+      hooks->Option.flatMap(h => h.beforeEach),
+      ~name="beforeEach",
+      ~timeout=?testCase.timeout,
+    ) {
+    | Pass => await runWithTimeout(testCase.run, testCase.timeout)
+    | failure => failure
+    }
+    withAfterEach(
+      result,
+      await runAsyncHook(
+        hooks->Option.flatMap(h => h.afterEach),
+        ~name="afterEach",
+        ~timeout=?testCase.timeout,
+      ),
+    )
+  }
 
 let printTotal = (~passed: int, ~failed: int, ~skipped: int, ~filtered: int): unit => {
   Console.log("\n" ++ Colors.dimmed(String.repeat("=", 50)))
@@ -262,10 +361,10 @@ let runSuiteAccumulate = (testSuite: testSuite, ~hasOnly: bool): (int, int, int,
   Console.log(`\n ${Colors.suite(testSuite.name)}`)
   Console.log(Colors.dimmed("-" ++ String.repeat("-", String.length(testSuite.name) + 3)))
 
-  switch testSuite.hooks {
-  | Some({beforeAll: Some(fn)}) => fn()
-  | _ => ()
-  }
+  let hooks = hooksIfAnyRuns(testSuite.hooks, testSuite.tests, (tc: testCase) =>
+    shouldRunTest(testSuite.name, tc.name) && runsByMode(tc.mode, ~hasOnly)
+  )
+  let beforeAll = runHook(hooks->Option.flatMap(h => h.beforeAll), ~name="beforeAll")
 
   let suitePassed = ref(0)
   let suiteFailed = ref(0)
@@ -274,22 +373,12 @@ let runSuiteAccumulate = (testSuite: testSuite, ~hasOnly: bool): (int, int, int,
 
   testSuite.tests->Array.forEach(testCase => {
     let passesFilter = shouldRunTest(testSuite.name, testCase.name)
-    let shouldRunByMode = switch testCase.mode {
-    | Skip => false
-    | Only => true
-    | Normal => !hasOnly
-    }
-    let shouldRun = passesFilter && shouldRunByMode
+    let shouldRun = passesFilter && runsByMode(testCase.mode, ~hasOnly)
 
     if !passesFilter {
       suiteFiltered := suiteFiltered.contents + 1
     } else if shouldRun {
-      switch testSuite.hooks {
-      | Some({beforeEach: Some(fn)}) => fn()
-      | _ => ()
-      }
-
-      switch runSafely(testCase.run) {
+      switch runTest(testCase, ~hooks, ~beforeAll) {
       | Pass => {
           Console.log(`   ${Colors.pass("✓")} ${testCase.name}`)
           suitePassed := suitePassed.contents + 1
@@ -300,11 +389,6 @@ let runSuiteAccumulate = (testSuite: testSuite, ~hasOnly: bool): (int, int, int,
           suiteFailed := suiteFailed.contents + 1
         }
       }
-
-      switch testSuite.hooks {
-      | Some({afterEach: Some(fn)}) => fn()
-      | _ => ()
-      }
     } else {
       Console.log(
         `   ${Colors.skip("○")} ${Colors.skip(testCase.name)} ${Colors.dimmed("(skipped)")}`,
@@ -313,9 +397,13 @@ let runSuiteAccumulate = (testSuite: testSuite, ~hasOnly: bool): (int, int, int,
     }
   })
 
-  switch testSuite.hooks {
-  | Some({afterAll: Some(fn)}) => fn()
-  | _ => ()
+  switch runHook(hooks->Option.flatMap(h => h.afterAll), ~name="afterAll") {
+  | Pass => ()
+  | Fail(message) => {
+      Console.log(`   ${Colors.fail("✗")} afterAll`)
+      Console.log(`     ${Colors.fail(message)}`)
+      suiteFailed := suiteFailed.contents + 1
+    }
   }
 
   let skipMsg = if suiteSkipped.contents > 0 {
@@ -339,10 +427,10 @@ let runAsyncSuiteAccumulate = async (
   Console.log(`\n ${Colors.suite(asyncSuite.name)}`)
   Console.log(Colors.dimmed("-" ++ String.repeat("-", String.length(asyncSuite.name) + 3)))
 
-  switch asyncSuite.hooks {
-  | Some({beforeAll: Some(fn)}) => await fn()
-  | _ => ()
-  }
+  let hooks = hooksIfAnyRuns(asyncSuite.hooks, asyncSuite.tests, (tc: asyncTestCase) =>
+    shouldRunTest(asyncSuite.name, tc.name) && runsByMode(tc.mode, ~hasOnly)
+  )
+  let beforeAll = await runAsyncHook(hooks->Option.flatMap(h => h.beforeAll), ~name="beforeAll")
 
   let suitePassed = ref(0)
   let suiteFailed = ref(0)
@@ -352,22 +440,12 @@ let runAsyncSuiteAccumulate = async (
   for j in 0 to Array.length(asyncSuite.tests) - 1 {
     let testCase = asyncSuite.tests->Array.getUnsafe(j)
     let passesFilter = shouldRunTest(asyncSuite.name, testCase.name)
-    let shouldRunByMode = switch testCase.mode {
-    | Skip => false
-    | Only => true
-    | Normal => !hasOnly
-    }
-    let shouldRun = passesFilter && shouldRunByMode
+    let shouldRun = passesFilter && runsByMode(testCase.mode, ~hasOnly)
 
     if !passesFilter {
       suiteFiltered := suiteFiltered.contents + 1
     } else if shouldRun {
-      switch asyncSuite.hooks {
-      | Some({beforeEach: Some(fn)}) => await fn()
-      | _ => ()
-      }
-
-      let result = await runWithTimeout(testCase.run, testCase.timeout)
+      let result = await runAsyncTest(testCase, ~hooks, ~beforeAll)
       switch result {
       | Pass => {
           Console.log(`   ${Colors.pass("✓")} ${testCase.name}`)
@@ -379,11 +457,6 @@ let runAsyncSuiteAccumulate = async (
           suiteFailed := suiteFailed.contents + 1
         }
       }
-
-      switch asyncSuite.hooks {
-      | Some({afterEach: Some(fn)}) => await fn()
-      | _ => ()
-      }
     } else {
       Console.log(
         `   ${Colors.skip("○")} ${Colors.skip(testCase.name)} ${Colors.dimmed("(skipped)")}`,
@@ -392,9 +465,13 @@ let runAsyncSuiteAccumulate = async (
     }
   }
 
-  switch asyncSuite.hooks {
-  | Some({afterAll: Some(fn)}) => await fn()
-  | _ => ()
+  switch await runAsyncHook(hooks->Option.flatMap(h => h.afterAll), ~name="afterAll") {
+  | Pass => ()
+  | Fail(message) => {
+      Console.log(`   ${Colors.fail("✗")} afterAll`)
+      Console.log(`     ${Colors.fail(message)}`)
+      suiteFailed := suiteFailed.contents + 1
+    }
   }
 
   let skipMsg = if suiteSkipped.contents > 0 {
@@ -458,33 +535,21 @@ let runAsyncSuite = async (asyncSuite: asyncTestSuite): unit => {
   let failed = ref(0)
   let skipped = ref(0)
 
-  // Run beforeAll hook if present
-  switch asyncSuite.hooks {
-  | Some({beforeAll: Some(fn)}) => await fn()
-  | _ => ()
-  }
-
   // Check if there are any "Only" tests
   let hasOnly = asyncSuite.tests->Array.some(tc => tc.mode == Only)
+
+  let hooks = hooksIfAnyRuns(asyncSuite.hooks, asyncSuite.tests, (tc: asyncTestCase) =>
+    runsByMode(tc.mode, ~hasOnly)
+  )
+
+  // Run beforeAll hook if present
+  let beforeAll = await runAsyncHook(hooks->Option.flatMap(h => h.beforeAll), ~name="beforeAll")
 
   for i in 0 to Array.length(asyncSuite.tests) - 1 {
     let testCase = asyncSuite.tests->Array.getUnsafe(i)
 
-    // Determine if this test should run
-    let shouldRun = switch testCase.mode {
-    | Skip => false
-    | Only => true
-    | Normal => !hasOnly
-    }
-
-    if shouldRun {
-      // Run beforeEach hook if present
-      switch asyncSuite.hooks {
-      | Some({beforeEach: Some(fn)}) => await fn()
-      | _ => ()
-      }
-
-      let result = await runWithTimeout(testCase.run, testCase.timeout)
+    if runsByMode(testCase.mode, ~hasOnly) {
+      let result = await runAsyncTest(testCase, ~hooks, ~beforeAll)
       switch result {
       | Pass => {
           Console.log(`  ${Colors.pass("✓")} ${testCase.name}`)
@@ -495,12 +560,6 @@ let runAsyncSuite = async (asyncSuite: asyncTestSuite): unit => {
           Console.log(`    ${Colors.fail(message)}`)
           failed := failed.contents + 1
         }
-      }
-
-      // Run afterEach hook if present
-      switch asyncSuite.hooks {
-      | Some({afterEach: Some(fn)}) => await fn()
-      | _ => ()
       }
     } else {
       Console.log(
@@ -513,9 +572,13 @@ let runAsyncSuite = async (asyncSuite: asyncTestSuite): unit => {
   }
 
   // Run afterAll hook if present
-  switch asyncSuite.hooks {
-  | Some({afterAll: Some(fn)}) => await fn()
-  | _ => ()
+  switch await runAsyncHook(hooks->Option.flatMap(h => h.afterAll), ~name="afterAll") {
+  | Pass => ()
+  | Fail(message) => {
+      Console.log(`  ${Colors.fail("✗")} afterAll`)
+      Console.log(`    ${Colors.fail(message)}`)
+      failed := failed.contents + 1
+    }
   }
 
   Console.log("")
