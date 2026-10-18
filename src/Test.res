@@ -77,9 +77,11 @@ let maxDiscards = 10
 module FuzzLoop = (E: Shrink.Effect) => {
   module Shrinker = Shrink.Make(E)
 
-  // How far the loop has got: values tested, and values the fuzzer couldn't
-  // make (e.g. ones Fuzz.filter rejected), which are discarded
-  type progress = {tested: int, discarded: int}
+  // How far the loop has got: values tested, how many it needs before it's
+  // done, the power of 2 of the next extra runs a distribution check takes,
+  // and values the fuzzer couldn't make (e.g. ones Fuzz.filter rejected),
+  // which are discarded
+  type progress = {tested: int, wanted: int, power: int, discarded: int}
 
   let run = (
     ~name: string,
@@ -87,11 +89,13 @@ module FuzzLoop = (E: Shrink.Effect) => {
     ~check: 'a => E.t<testResult>,
     ~runs: int,
     ~maxShrinks: int,
+    ~distribution: option<Distribution.t<'a>>,
   ): E.t<testResult> =>
     switch seed() {
     | Error(message) => E.return(Fail(message))
     | Ok(seed) => {
         let prng = Prng.make(Prng.seedFor(seed, name))
+        let counts = distribution->Option.mapOr([], Distribution.emptyCounts)
         let seedText = Float.toString(seed)
 
         let shrink = (~tested, ~run, ~value, ~failure) =>
@@ -120,9 +124,45 @@ module FuzzLoop = (E: Shrink.Effect) => {
             )
           )
 
-        E.loop({tested: 0, discarded: 0}, progress =>
-          if progress.tested >= runs {
-            E.return(Error(Pass))
+        // After the runs: the distribution's report or check, which can need
+        // more runs to decide
+        let finish = progress =>
+          switch distribution {
+          | None => Error(Pass)
+          | Some(Report(_)) => {
+              // Before the test's ✓ line, which the runner prints after this, and
+              // indented like a failure's message
+              Console.log(
+                Distribution.table(counts, ~total=progress.tested)
+                ->String.split("\n")
+                ->Array.map(line => "     " ++ line)
+                ->Array.join("\n"),
+              )
+              Error(Pass)
+            }
+          | Some(Expect(expectations)) =>
+            switch Distribution.check(expectations, counts, ~total=progress.tested) {
+            | Covered => Error(Pass)
+            | NotCovered(message) =>
+              Error(
+                Fail(
+                  `${message}\n       ${Assert.indent(
+                      Distribution.table(counts, ~total=progress.tested),
+                    )}`,
+                ),
+              )
+            | Undecided =>
+              Ok({
+                ...progress,
+                wanted: progress.tested + Float.toInt(2. ** Int.toFloat(progress.power)),
+                power: progress.power + 1,
+              })
+            }
+          }
+
+        E.loop({tested: 0, wanted: runs, power: 1, discarded: 0}, progress =>
+          if progress.tested >= progress.wanted {
+            E.return(finish(progress))
           } else {
             let choices = Choices.random(prng)
             switch Fuzz.generate(fuzzer, choices) {
@@ -130,12 +170,15 @@ module FuzzLoop = (E: Shrink.Effect) => {
             // values doesn't fail the test, unless it rejects most of them
             | exception Choices.Reject(reason) =>
               E.return(
-                progress.discarded >= maxDiscards * runs
+                progress.discarded >= maxDiscards * progress.wanted
                   ? Error(Fail(`The fuzzer couldn't make a value: ${reason}`))
                   : Ok({...progress, discarded: progress.discarded + 1}),
               )
             | exception exn => E.return(Error(Runner.exceptionFailure(~thrower="The fuzzer", exn)))
             | value => {
+                distribution->Option.forEach(distribution =>
+                  Distribution.count(counts, distribution, value)
+                )
                 let tested = progress.tested + 1
                 check(value)->E.flatMap(result =>
                   switch result {
@@ -163,6 +206,7 @@ let fuzz = (
   property: 'a => testResult,
   ~runs: int=100,
   ~maxShrinks: int=10000,
+  ~distribution: option<Distribution.t<'a>>=?,
 ): testCase => {
   name,
   mode: Normal,
@@ -174,6 +218,7 @@ let fuzz = (
       ~check=value => Runner.runSafely(() => property(value)),
       ~runs,
       ~maxShrinks,
+      ~distribution,
     ),
 }
 
@@ -183,6 +228,7 @@ let fuzzAsync = (
   property: 'a => promise<testResult>,
   ~runs: int=100,
   ~maxShrinks: int=10000,
+  ~distribution: option<Distribution.t<'a>>=?,
   ~timeout: option<int>=?,
 ): asyncTestCase => {
   name,
@@ -197,5 +243,6 @@ let fuzzAsync = (
       ~check=value => Runner.runWithTimeout(() => property(value), timeout),
       ~runs,
       ~maxShrinks,
+      ~distribution,
     ),
 }

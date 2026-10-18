@@ -361,3 +361,120 @@ let fuzzSeedTests = Suite.make(
     ),
   ],
 )
+
+// A fuzz test of bools that checks the distribution
+let checkBools = (expectations: array<(Distribution.expected, string, bool => bool)>) =>
+  Test.fuzz(
+    "distribution",
+    Fuzz.bool,
+    _ => Pass,
+    ~distribution=Distribution.expect(expectations),
+  )->runWithSeed(1., _)
+
+let insufficient = (result: testResult, label: string): testResult =>
+  switch result {
+  | Fail(message) => Assert.contains(message, `Distribution of label "${label}" was insufficient`)
+  | Pass => Fail("Expected the distribution check to fail")
+  }
+
+let distributionTests = Suite.make(
+  "Distribution",
+  [
+    Test.make("AtLeast passes when a label is common enough", () =>
+      Assert.equal(
+        checkBools([(AtLeast(40.), "true", b => b), (AtLeast(40.), "false", b => !b)]),
+        Pass,
+      )
+    ),
+    Test.make("AtLeast(100.) passes when every value has the label", () =>
+      Assert.equal(checkBools([(AtLeast(100.), "any", _ => true)]), Pass)
+    ),
+    Test.make("AtLeast fails when a label is too rare", () =>
+      checkBools([(AtLeast(80.), "true", b => b)])->insufficient("true")
+    ),
+    Test.make("Zero passes when no value has the label, and fails otherwise", () =>
+      Assert.combineResults([
+        Assert.equal(checkBools([(Zero, "neither", b => b && !b)]), Pass),
+        checkBools([(Zero, "true", b => b)])->insufficient("true"),
+      ])
+    ),
+    Test.make("MoreThanZero passes when a value has the label, and fails otherwise", () =>
+      Assert.combineResults([
+        Assert.equal(checkBools([(MoreThanZero, "true", b => b)]), Pass),
+        checkBools([(MoreThanZero, "neither", b => b && !b)])->insufficient("neither"),
+      ])
+    ),
+    Test.make("Zero fails as soon as a value has the label", () =>
+      switch checkBools([(AtLeast(50.), "true", b => b), (Zero, "false", b => !b)]) {
+      // AtLeast(50.) would take more values to decide
+      | Fail(message) => Assert.contains(message, "(Generated 100 values.)")
+      | Pass => Fail("Expected the distribution check to fail")
+      }
+    ),
+    Test.make("MoreThanZero looks through more values for a rare label", () =>
+      Array.fromInitializer(~length=50, Int.toFloat)
+      ->Array.map(seed =>
+        Test.fuzz(
+          "rare",
+          Fuzz.intRange(1, 100),
+          _ => Pass,
+          ~distribution=Distribution.expect([(MoreThanZero, "is 1", n => n == 1)]),
+        )->runWithSeed(seed, _)
+      )
+      ->Array.map(result => Assert.equal(result, Pass))
+      ->Assert.combineResults
+    ),
+    Test.make("a label's count includes the combinations it's in", () => {
+      let counts = Distribution.emptyCounts(Distribution.report([("a", _ => true), ("b", x => x)]))
+      let distribution = Distribution.report([("a", _ => true), ("b", x => x)])
+      [true, false, true]->Array.forEach(value => Distribution.count(counts, distribution, value))
+      Assert.equal(
+        Distribution.includeCombinations(counts),
+        [(["a"], 3), (["b"], 2), (["a", "b"], 2)],
+      )
+    }),
+    Test.make("the report is a table of each label's share", () => {
+      let distribution = Distribution.report([("small", n => n < 3), ("even", n => mod(n, 2) == 0)])
+      let counts = Distribution.emptyCounts(distribution)
+      [0, 1, 2, 3, 5]->Array.forEach(n => Distribution.count(counts, distribution, n))
+      Assert.equal(
+        Distribution.table(counts, ~total=5),
+        [
+          "Distribution report:",
+          "====================",
+          "  small:            60%  (3x)  ██████████████████░░░░░░░░░░░░",
+          "  even:             40%  (2x)  ████████████░░░░░░░░░░░░░░░░░░",
+          "  <uncategorized>:  40%  (2x)  ████████████░░░░░░░░░░░░░░░░░░",
+          "Combinations (included in the above base counts):",
+          "  small, even:      40%  (2x)  ████████████░░░░░░░░░░░░░░░░░░",
+        ]->Array.join("\n"),
+      )
+    }),
+    Test.fuzz(
+      "option makes None a quarter of the time",
+      Fuzz.option(Fuzz.int),
+      _ => Pass,
+      ~distribution=Distribution.expect([
+        (AtLeast(20.), "None", Option.isNone),
+        (AtLeast(70.), "Some", Option.isSome),
+      ]),
+    ),
+    Test.fuzz(
+      "array makes short and long arrays",
+      Fuzz.array(Fuzz.int),
+      _ => Pass,
+      ~distribution=Distribution.report([
+        ("empty", items => Array.length(items) == 0),
+        ("1 to 10 items", items => Array.length(items) >= 1 && Array.length(items) <= 10),
+        ("over 10 items", items => Array.length(items) > 10),
+      ]),
+    ),
+    Test.make("the inverse normal is accurate", () =>
+      Assert.combineResults([
+        Assert.isTrue(Math.abs(Distribution.inverseNormal(0.975) -. 1.959963984540054) < 1e-8),
+        Assert.isTrue(Math.abs(Distribution.inverseNormal(0.5)) < 1e-12),
+        Assert.isTrue(Math.abs(Distribution.inverseNormal(1e-10) +. 6.361340902404056) < 1e-6),
+      ])
+    ),
+  ],
+)
