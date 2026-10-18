@@ -5,6 +5,24 @@
 
 A test framework for ReScript applications.
 
+## This fork
+
+This `fixes` branch is upstream's `main` with these fixes, each its own
+commit with tests:
+
+- An exception thrown by a synchronous test fails that test, as it already did
+  for async tests, rather than stopping the rest of its file.
+- A failure from an exception names it, with its payload for a ReScript
+  exception (`Invalid('age', -1)`) or `name: message` for a JS error, and
+  gives the line in your code that threw.
+- Failure messages show the contents of records, variants and other objects
+  (with `util.inspect`) instead of `[object Object]`, and `Assert.equal`
+  shows a line diff of actual and expected.
+
+To use it, add it to `package.json` as `"zekr": "github:mediremi/zekr#fixes"`.
+npm compiles it when installing it (`prepare`), and `package-lock.json` pins
+the commit.
+
 ## Installation
 
 ```bash
