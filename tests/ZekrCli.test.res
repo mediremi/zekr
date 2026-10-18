@@ -58,6 +58,18 @@ let parseArgsTests = Suite.make(
       | Ok(_) => Fail("Expected error for missing value")
       }
     }),
+    Test.make("parses --seed, for fuzz tests", () =>
+      switch (Cli.parseArgs(["--seed", "42"]), Cli.parseArgs([])) {
+      | (Ok({seed: "42"}), Ok({seed: ?None})) => Pass
+      | _ => Fail("Expected the seed parsed, and none by default")
+      }
+    ),
+    Test.make("errors on a seed that isn't from 0 to 2^32 - 1", () =>
+      switch (Cli.parseArgs(["--seed", "-1"]), Cli.parseArgs(["--seed", "4294967296"])) {
+      | (Error(_), Error(_)) => Pass
+      | _ => Fail("Expected errors for invalid seeds")
+      }
+    ),
   ],
 )
 

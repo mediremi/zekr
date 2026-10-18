@@ -16,5 +16,6 @@ export * as Colors from "./Colors.js";
 export * as Prng from "./Prng.js";
 export * as Choices from "./Choices.js";
 export * as Fuzz from "./Fuzz.js";
+export * as Shrink from "./Shrink.js";
 // Note: Cli (Zekr.Cli) is intentionally NOT re-exported here — it is the
 // `zekr` binary's entry point, not a library API. See bin/zekr.mjs.

@@ -1,11 +1,19 @@
 // Cli - test file discovery and execution for the `zekr` binary
 
-type cliArgs = {pattern: option<string>, dir: option<string>, help: bool, watch: bool}
+type cliArgs = {
+  pattern: option<string>,
+  dir: option<string>,
+  help: bool,
+  watch: bool,
+  // The seed for fuzz tests (see Test.fuzz)
+  seed?: string,
+}
 type config = {pattern: string, dir: string}
 type fileConfig = {pattern: option<string>, dir: option<string>}
 type runSummary = {total: int, passed: int, failed: int}
 
 @val @scope("process") external exit: int => unit = "exit"
+@val @scope("process") external env: Dict.t<string> = "env"
 
 module NodeFs = {
   type stats
@@ -49,6 +57,7 @@ let parseArgs = (argv: array<string>): result<cliArgs, string> => {
   let dir = ref(None)
   let help = ref(false)
   let watch = ref(false)
+  let seed = ref(None)
   let error = ref(None)
   let i = ref(0)
   let n = Array.length(argv)
@@ -80,6 +89,15 @@ let parseArgs = (argv: array<string>): result<cliArgs, string> => {
         }
       | None => error := Some("Missing value for " ++ arg)
       }
+    | "--seed" =>
+      switch argv->Array.get(i.contents + 1) {
+      | Some(value) if Prng.parseSeed(value)->Option.isSome => {
+          seed := Some(value)
+          i := i.contents + 2
+        }
+      | Some(value) => error := Some(`Invalid seed: ${value} (it must be from 0 to 4294967295)`)
+      | None => error := Some("Missing value for " ++ arg)
+      }
     | other => error := Some("Unknown argument: " ++ other)
     }
   }
@@ -87,7 +105,13 @@ let parseArgs = (argv: array<string>): result<cliArgs, string> => {
   switch error.contents {
   | Some(message) => Error(message)
   | None =>
-    Ok({pattern: pattern.contents, dir: dir.contents, help: help.contents, watch: watch.contents})
+    Ok({
+      pattern: pattern.contents,
+      dir: dir.contents,
+      help: help.contents,
+      watch: watch.contents,
+      seed: ?seed.contents,
+    })
   }
 }
 
@@ -389,6 +413,7 @@ let printUsage = (): unit => {
 Options:
   -p, --pattern <suffix>   Filename suffix to match (default: ${defaultPattern})
   -d, --dir <path>         Directory to scan (default: ${defaultDir})
+      --seed <number>      Seed for fuzz tests, to reproduce a failure (or ZEKR_SEED)
   -h, --help               Show this help
 
 Config file (zekr.json, optional):
@@ -512,6 +537,11 @@ let main = (argv: array<string>): unit => {
       exit(0)
     }
   | Ok(args) =>
+    // Test files run in their own processes, which inherit the environment
+    switch args.seed {
+    | Some(seed) => env->Dict.set("ZEKR_SEED", seed)
+    | None => ()
+    }
     switch readFileConfig() {
     | Error(message) => {
         Console.error(Colors.fail(message))

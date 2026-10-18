@@ -103,9 +103,11 @@ let map3: (t<'a>, t<'b>, t<'c>, ('a, 'b, 'c) => 'd) => t<'d>
 //   )
 let andThen: (t<'a>, 'a => t<'b>) => t<'b>
 
-// Only the values for which keep is true. A fuzzer that keeps too few values
-// (none of 16 in a row) fails its test, so prefer map when you can: an even
-// int is Fuzz.int->Fuzz.map(n => n * 2), not a filter.
+// Only the values for which keep is true. When it keeps none of 16 in a row,
+// the fuzz test discards the value and draws another, and it fails once it
+// has discarded 10 times as many values as it needs. A filter slows tests
+// down, so prefer map when you can: an even int is
+// Fuzz.int->Fuzz.map(n => n * 2), not a filter.
 let filter: (t<'a>, 'a => bool) => t<'a>
 
 // A fuzzer made when it's first used, for a fuzzer that refers to itself
@@ -154,8 +156,17 @@ let labelExamples: (
   ~seed: float=?,
 ) => array<(array<string>, option<'a>)>
 
-// For fuzz tests
+// For fuzz tests and Shrink
 
 // The fuzzer's value from these choices. Throws Choices.Reject when it can't
 // make one.
 let generate: (t<'a>, Choices.t) => 'a
+
+// How the float fuzzers lay out a float in choices, for Shrink to simplify it
+module FloatBits: {
+  let isFractional: float => bool
+  let getExponent: float => int
+  let setExponent: (int, (float, float)) => (float, float)
+  let getMantissa: (float, float) => float
+  let setMantissa: (float, (float, float)) => (float, float)
+}
