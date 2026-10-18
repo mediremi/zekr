@@ -1,5 +1,7 @@
 open Types
 
+type person = {name: string, age: int}
+
 let assertEqualTests = Suite.make(
   "Assert.equal",
   [
@@ -25,6 +27,62 @@ let assertEqualTests = Suite.make(
       | Pass => Fail("Expected Fail")
       }
     }),
+    Test.make("shows the contents of records", () => {
+      switch Assert.equal({name: "Ada", age: 36}, {name: "Ada", age: 37}) {
+      | Fail(msg) =>
+        Assert.combineResults([
+          Assert.contains(msg, "    name: 'Ada',"),
+          Assert.contains(msg, "-   age: 36"),
+          Assert.contains(msg, "+   age: 37"),
+          Assert.isFalse(String.includes(msg, "[object Object]")),
+        ])
+      | Pass => Fail("Expected Fail")
+      }
+    }),
+    Test.make("shows the contents of variants", () => {
+      switch Assert.equal(Ok(1), Error("nope")) {
+      | Fail(msg) =>
+        Assert.combineResults([
+          Assert.contains(msg, "-   TAG: 'Ok',"),
+          Assert.contains(msg, "-   _0: 1"),
+          Assert.contains(msg, "+   TAG: 'Error',"),
+          Assert.contains(msg, "+   _0: 'nope'"),
+        ])
+      | Pass => Fail("Expected Fail")
+      }
+    }),
+    Test.make("marks only the lines that differ, and folds the rest", () => {
+      let numbers = Array.fromInitializer(~length=20, i => i)
+      let changed = numbers->Array.map(i => i == 10 ? 100 : i)
+      switch Assert.equal(numbers, changed) {
+      | Fail(msg) =>
+        Assert.combineResults([
+          Assert.contains(msg, "-   10,"),
+          Assert.contains(msg, "+   100,"),
+          Assert.contains(msg, "    9,"),
+          Assert.contains(msg, "    13,"),
+          Assert.isFalse(String.includes(msg, "    14,"), ~message="Expected line 14 to be folded"),
+          Assert.contains(msg, "…"),
+          Assert.isFalse(String.includes(msg, "    2,"), ~message="Expected line 2 to be folded"),
+        ])
+      | Pass => Fail("Expected Fail")
+      }
+    }),
+  ],
+)
+
+let diffTests = Suite.make(
+  "Assert.diffLines",
+  [
+    Test.make("keeps shared lines and marks the others", () =>
+      Assert.equal(
+        Assert.diffLines("a\nb\nc", "a\nx\nc"),
+        [Same("a"), Removed("b"), Added("x"), Same("c")],
+      )
+    ),
+    Test.make("handles lines only in one side", () =>
+      Assert.equal(Assert.diffLines("a", "a\nb"), [Same("a"), Added("b")])
+    ),
   ],
 )
 
